@@ -1,119 +1,102 @@
-import { CrawlerService } from './mcp/crawlerService';
-import { StorageService } from './services/storageService';
-import { crawlerConfigs } from './config/crawlerConfig';
-import { jobSearchUrls } from './config/urlConfig';
-import { CrawlerData } from './crawler/webCrawler';
+import { WebCrawler, CrawlerResult } from './crawler/webCrawler';
+import {
+  SearchParams,
+  SiteConfig,
+  searchConfigs,
+  findConfigForUrl,
+} from './config/crawlerConfig';
 
-// 定义搜索参数接口
-export interface SearchParams {
-  keyword?: string;
-  city?: string;
-  page?: number;
-  salary?: string;
-  workYear?: string;
+export type { SearchParams } from './config/crawlerConfig';
+
+/** Use stderr for logging so stdout stays clean for MCP stdio transport */
+function log(message: string): void {
+  process.stderr.write(`[mcp-jobs] ${message}\n`);
 }
 
-async function crawlByUrl(url: string, params: SearchParams): Promise<CrawlerData[] | null> {
-  const crawlerService = new CrawlerService();
-  const storageService = new StorageService();
-
-  // 根据 URL 匹配对应的配置
-  const matchedConfig = crawlerConfigs.find(config => {
-    if (config.url === url) return true;
-    if (config.urlPattern && new RegExp(config.urlPattern).test(url)) return true;
-    return false;
-  });
-
-  if (!matchedConfig) {
-    console.error('No matching configuration found for URL:', url);
-    return null;
+/**
+ * Search job listings across all configured platforms.
+ * Returns a flat array of job objects.
+ */
+export async function searchJobList(params: SearchParams): Promise<any[]> {
+  const { keyword } = params;
+  if (!keyword) {
+    throw new Error('keyword is required');
   }
 
-  try {
-    // console.log(`Starting crawl for URL: ${url}`);
-    const { keyword, city, page, salary, workYear } = params;
-    // 创建一个新的配置，使用匹配到的规则但替换URL
-    const customConfig = {
-      ...matchedConfig,
-      url: matchedConfig.urlBuilder(url, params, matchedConfig?.config || {})
-    };
-    console.log(customConfig);
-    const result = await crawlerService.startCrawling(customConfig);
-    console.log(result);
-    
-    // 获取爬取的数据
-    const dataset = result || [];
-    
-    // 保存爬取结果
-    await storageService.saveData(customConfig.name, {
-      config: customConfig,
-      items: dataset,
-      timestamp: Date.now()
-    });
+  log(`Searching jobs: keyword="${keyword}", city="${params.city || '全国'}"`);
 
-    // console.log(`Crawling completed for URL: ${url}`);
-    return dataset;
-  } catch (error) {
-    // console.error(`Error crawling URL ${url}:`, error);
-    return null;
-  }
-}
+  const results: any[] = [];
 
-export async function searchJobList(params: SearchParams = {}) {
-  const { keyword, city, page = 1, salary, workYear } = params;
-  const result : any[] = [];
-
-  console.log(`开始搜索职位 - 关键词: ${keyword}, 城市: ${city || '全国'}`);
-
-  for (const config of jobSearchUrls) {
+  for (const config of searchConfigs) {
+    const crawler = new WebCrawler();
     try {
-      const dataset = await crawlByUrl(config.url, {
-        keyword: keyword + ' ' + city,
-        city,
-        page,
-        salary,
-        workYear
-      });
-      if (dataset) {
-        const jobItems = dataset.filter(item => item.data?.jobInfo);
-        jobItems.forEach(item => {
-          result.push(...item.data.jobInfo)
-        });
-        console.log(`从 ${config.name} 获取到 ${result.length} 个职位`);
+      const url = config.urlBuilder(params);
+      log(`Crawling ${config.name}: ${url}`);
+
+      const result = await crawler.crawl(url, config);
+
+      if (result.succeeded && result.data.jobInfo) {
+        const jobs = result.data.jobInfo.filter(Boolean);
+        results.push(...jobs);
+        log(`Got ${jobs.length} jobs from ${config.name}`);
+      } else if (!result.succeeded) {
+        log(`Failed to crawl ${config.name}: ${result.error}`);
       }
-    } catch (error) {
-      console.warn(`从 ${config.name} 获取职位失败:`, error instanceof Error ? error.message : String(error));
-      // Continue with other sources even if one fails
+    } catch (err: any) {
+      log(`Error crawling ${config.name}: ${err.message}`);
+    } finally {
+      await crawler.close();
     }
   }
 
-  console.log(`搜索完成，总共找到 ${result.length} 个职位`);
-  console.log(result);
-  return result;
+  log(`Search complete: ${results.length} total jobs found`);
+  return results;
 }
 
-async function main() {
-  const result = await searchJobList({ keyword: '前端开发', city: '北京', page: 1, salary: '10-15万', workYear: '1-3年' });
-  // const result = await crawlJobDetail('https://m.zhipin.com/job_detail/7d5caa6504e27b8b1HF839S1FVtU.html');
-  // console.log(result);
-}
-
-export async function crawlJobDetail(url: string) {
-  const result = await crawlByUrl(url, {});
-  // console.log(result);
-  if (!result || result.length === 0) {
+/**
+ * Crawl a single job detail page by URL.
+ * Automatically matches the URL to the correct site config.
+ */
+export async function crawlJobDetail(url: string): Promise<any | null> {
+  const config = findConfigForUrl(url);
+  if (!config) {
+    log(`No config found for URL: ${url}`);
     return null;
   }
-  return result[0]?.data?.job || null;
+
+  const crawler = new WebCrawler();
+  try {
+    log(`Crawling job detail: ${url}`);
+    const result = await crawler.crawl(url, config);
+
+    if (!result.succeeded) {
+      log(`Failed to crawl detail: ${result.error}`);
+      return null;
+    }
+
+    // result.data.job is an array from extractData; take the first element
+    const jobData = result.data.job;
+    if (Array.isArray(jobData)) {
+      return jobData[0] || null;
+    }
+    return jobData || null;
+  } catch (err: any) {
+    log(`Error crawling detail: ${err.message}`);
+    return null;
+  } finally {
+    await crawler.close();
+  }
 }
 
-// 导出函数供外部使用
-export {
-  crawlByUrl,
-  jobSearchUrls
- };
-
-// 如果直接运行此文件，则执行 main 函数
+// CLI entry point for quick testing
 if (require.main === module) {
-  main();
+  searchJobList({ keyword: '前端开发', city: '北京', page: 1 })
+    .then((result) => {
+      process.stderr.write(`Found ${result.length} jobs\n`);
+      console.log(JSON.stringify(result, null, 2));
+    })
+    .catch((err) => {
+      process.stderr.write(`Error: ${err.message}\n`);
+      process.exit(1);
+    });
 }
