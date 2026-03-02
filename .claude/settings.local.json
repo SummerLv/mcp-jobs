@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(pnpm install:*)",
+      "Bash(pnpm run:*)",
+      "Bash(true:*)",
+      "Bash(tail:*)",
+      "Bash(timeout 60 node:*)",
+      "Bash(timeout 90 node:*)",
+      "Bash(timeout 120 node:*)"
+    ]
+  }
+}
